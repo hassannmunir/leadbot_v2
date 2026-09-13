@@ -1,14 +1,10 @@
 """
 Local web form at http://127.0.0.1:8080
 
-WHY THIS FILE EXISTS (vs the old ui.py):
-The old form made the user type an exact OSM tag value themselves ("Use
-an exact OSM value such as restaurant, clinic, hotel") AND never computed
-a bbox -- so it always hit the buggy no-tags OSM query path. This version:
-  - shows a dropdown of plain-English niches (from niche_map.json)
-  - always geocodes to a bbox before querying (via main.py's pipeline)
-  - shows the run's console output (including tile counts, quota
-    warnings, and the final "N new leads added" line) once it finishes
+Reads main.py's stdout LIVE (line by line, while it's still running) so
+the progress bar reflects real work being done -- geocoding, tiling,
+OSM querying, and website verification -- instead of jumping straight
+from "running" to "complete".
 """
 
 import json
@@ -21,7 +17,9 @@ from urllib.parse import parse_qs
 
 from .sources import load_niche_map
 
-JOB = {"status": "idle", "progress": 0, "message": "Ready"}
+JOB = {"status": "idle", "progress": 0, "message": "Ready", "log": []}
+JOB_LOCK = threading.Lock()
+RUN_TIMEOUT_SECONDS = 1800  # 30 min safety cap for one collection run
 
 
 def _niche_options_html() -> str:
@@ -39,13 +37,17 @@ label{{display:block;color:#a9c2b7;font:13px Arial;margin:18px 0 7px}}
 input,select{{width:100%;box-sizing:border-box;padding:13px;background:#0e181a;color:#fff;border:1px solid #40645b;border-radius:8px;font-size:15px}}
 button{{margin-top:25px;padding:14px 22px;background:#d6ae59;border:0;border-radius:8px;font-weight:bold;cursor:pointer}}
 .hint{{color:#9bb3a8;font:13px Arial;line-height:1.5}}
-.result{{margin-top:25px;padding:15px;background:#0e181a;border-left:3px solid #d6ae59;font-family:Arial;white-space:pre-wrap;max-height:300px;overflow:auto}}
+.progress-wrap{{background:#0e181a;border-radius:6px;overflow:hidden;height:8px;margin-top:12px}}
+.progress-bar{{background:#d6ae59;height:100%;width:0%;transition:width .3s}}
+.result{{margin-top:15px;padding:15px;background:#0e181a;border-left:3px solid #d6ae59;font-family:Arial;font-size:13px;white-space:pre-wrap;max-height:260px;overflow:auto}}
 </style></head>
 <body><main>
 <div class="eyebrow">Lead operations / local console</div>
 <h1>Find businesses in your territory.</h1>
 <p class="hint">Pick a country, region (city or state), and niche. LeadBot geocodes the region, tiles it if it's large, queries OpenStreetMap, checks each business's own website, and adds only new leads to your Google Sheet.</p>
-<div class="result" id="status">Ready · 0%</div>
+<div id="status-line" style="font-family:Arial">Ready &middot; 0%</div>
+<div class="progress-wrap"><div class="progress-bar" id="progress-bar"></div></div>
+<div class="result" id="log"></div>
 <form method="post">
 <div class="grid">
 <div><label>Country</label><input name="country" value="United States" required></div>
@@ -56,7 +58,14 @@ button{{margin-top:25px;padding:14px 22px;background:#d6ae59;border:0;border-rad
 <button type="submit">Run lead collection</button>
 </form>
 <div class="hint" style="margin-top:20px">Don't see your niche? Add it to <b>leadbot/niche_map.json</b> and restart this page.</div>
-<script>setInterval(()=>fetch('/status').then(r=>r.json()).then(x=>document.getElementById('status').textContent=x.message+' · '+x.progress+'%'),1000)</script>
+<script>
+setInterval(() => fetch('/status').then(r => r.json()).then(x => {{
+  document.getElementById('status-line').textContent = x.message + ' \\u00b7 ' + x.progress + '%';
+  document.getElementById('progress-bar').style.width = x.progress + '%';
+  document.getElementById('log').textContent = x.log.join('\\n');
+  document.getElementById('log').scrollTop = document.getElementById('log').scrollHeight;
+}}), 1000)
+</script>
 </main></body></html>'''
 
 
@@ -72,7 +81,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
-            self.wfile.write(json.dumps(JOB).encode())
+            with JOB_LOCK:
+                self.wfile.write(json.dumps(JOB).encode())
             return
         self._send_html(_page_html())
 
@@ -94,23 +104,62 @@ class Handler(BaseHTTPRequestHandler):
             runner = str(venv_python) if venv_python.exists() else sys.executable
 
             def run_job():
-                JOB.update(status="running", progress=10, message="Collecting businesses...")
-                result = subprocess.run(
-                    [runner, "-m", "leadbot.main", "--config", "config.json"],
-                    capture_output=True, text=True, timeout=600, cwd=str(Path.cwd()),
-                )
-                output = (result.stdout or "") + (result.stderr or "")
-                if result.returncode == 0:
-                    JOB.update(status="complete", progress=100, message=output.strip()[-800:] or "Collection complete")
-                else:
-                    JOB.update(status="error", progress=100, message=output.strip()[-800:] or "Collection failed")
+                with JOB_LOCK:
+                    JOB.update(status="running", progress=0, message="Starting...",
+                               log=[f"Using interpreter: {runner}", f"Working dir: {Path.cwd()}"])
+                try:
+                    process = subprocess.Popen(
+                        [runner, "-m", "leadbot.main", "--config", "config.json"],
+                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                        text=True, bufsize=1, cwd=str(Path.cwd()),
+                    )
+
+                    timer = threading.Timer(RUN_TIMEOUT_SECONDS, process.kill)
+                    timer.start()
+                    try:
+                        for raw_line in process.stdout:
+                            line = raw_line.rstrip("\n")
+                            if not line:
+                                continue
+                            with JOB_LOCK:
+                                if line.startswith("PROGRESS "):
+                                    parts = line.split(" ", 2)
+                                    try:
+                                        JOB["progress"] = max(0, min(100, int(parts[1])))
+                                        JOB["message"] = parts[2] if len(parts) > 2 else ""
+                                    except (IndexError, ValueError):
+                                        pass
+                                JOB["log"].append(line)
+                                JOB["log"] = JOB["log"][-40:]
+                        returncode = process.wait()
+                    finally:
+                        timer.cancel()
+
+                    with JOB_LOCK:
+                        if returncode == 0:
+                            JOB["status"] = "complete"
+                            JOB["progress"] = 100
+                        else:
+                            JOB["status"] = "error"
+                            JOB["message"] = JOB["message"] or f"Failed (exit code {returncode})"
+
+                except Exception as e:
+                    # This is the fix: any failure to even START the subprocess
+                    # (bad interpreter path, missing config.json, permissions,
+                    # etc.) used to die silently in this background thread and
+                    # never reach the browser. Now it's forced into the log.
+                    import traceback
+                    with JOB_LOCK:
+                        JOB["status"] = "error"
+                        JOB["message"] = f"Could not run collection: {e}"
+                        JOB["log"].append(traceback.format_exc())
 
             threading.Thread(target=run_job, daemon=True).start()
             self._send_html(_page_html())
         except Exception as e:
             self._send_html(_page_html().replace(
-                '<div class="result" id="status">Ready · 0%</div>',
-                f'<div class="result" id="status">Could not start: {e}</div>',
+                'id="status-line">Ready',
+                f'id="status-line">Could not start: {e}',
             ))
 
 
