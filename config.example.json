@@ -1,0 +1,23 @@
+{
+  "delay_seconds": 3,
+  "minimum_quality_score": 0,
+  "max_tile_area_deg2": 0.35,
+  "phone_region": "US",
+
+  "overpass_endpoints": [
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://overpass.private.coffee/api/interpreter"
+  ],
+
+  "google_sheet_id": "",
+  "google_service_account_file": "",
+  "csv_out": "leads.csv",
+  "quota_state_file": "quota_state.json",
+
+  "queries": [
+    {"country": "United States", "region": "Austin, Texas", "niche": "restaurant"},
+    {"country": "United States", "region": "Houston, Texas", "niche": "restaurant"},
+    {"country": "United States", "region": "Dallas, Texas", "niche": "restaurant"}
+  ]
+}

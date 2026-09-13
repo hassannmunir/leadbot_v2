@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+config.json
+leads.csv
+quota_state.json
+*.json.key
+leadbot-service-account.json

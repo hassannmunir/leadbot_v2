@@ -1,0 +1,50 @@
+{
+  "restaurant": [{"category": "amenity", "value": "restaurant"}],
+  "cafe": [{"category": "amenity", "value": "cafe"}],
+  "fast_food": [{"category": "amenity", "value": "fast_food"}],
+  "bakery": [{"category": "shop", "value": "bakery"}],
+  "bar": [{"category": "amenity", "value": "bar"}],
+
+  "clinic": [{"category": "amenity", "value": "clinic"}],
+  "dentist": [{"category": "amenity", "value": "dentist"}],
+  "doctor": [{"category": "amenity", "value": "doctors"}],
+  "hospital": [{"category": "amenity", "value": "hospital"}],
+  "pharmacy": [{"category": "amenity", "value": "pharmacy"}],
+  "veterinary": [{"category": "amenity", "value": "veterinary"}],
+
+  "hotel": [{"category": "tourism", "value": "hotel"}],
+  "guest_house": [{"category": "tourism", "value": "guest_house"}],
+
+  "gym": [{"category": "leisure", "value": "fitness_centre"}],
+  "spa": [{"category": "leisure", "value": "spa"}],
+  "salon": [{"category": "shop", "value": "hairdresser"}],
+  "beauty": [{"category": "shop", "value": "beauty"}],
+
+  "school": [{"category": "amenity", "value": "school"}],
+  "university": [{"category": "amenity", "value": "university"}],
+
+  "real_estate": [{"category": "office", "value": "estate_agent"}],
+  "law_firm": [{"category": "office", "value": "lawyer"}],
+  "accounting_firm": [{"category": "office", "value": "accountant"}],
+  "insurance_agency": [{"category": "office", "value": "insurance"}],
+  "marketing_agency": [{"category": "office", "value": "advertising_agency"}],
+  "it_company": [{"category": "office", "value": "it"}],
+
+  "supermarket": [{"category": "shop", "value": "supermarket"}],
+  "grocery": [{"category": "shop", "value": "convenience"}],
+  "electronics_store": [{"category": "shop", "value": "electronics"}],
+  "furniture_store": [{"category": "shop", "value": "furniture"}],
+  "jewelry_store": [{"category": "shop", "value": "jewelry"}],
+  "clothing_store": [{"category": "shop", "value": "clothes"}],
+  "bookstore": [{"category": "shop", "value": "books"}],
+  "car_dealer": [{"category": "shop", "value": "car"}],
+  "gas_station": [{"category": "amenity", "value": "fuel"}],
+  "bank": [{"category": "amenity", "value": "bank"}],
+
+  "auto_repair": [{"category": "shop", "value": "car_repair"}],
+  "plumber": [{"category": "craft", "value": "plumber"}],
+  "electrician": [{"category": "craft", "value": "electrician"}],
+  "photographer": [{"category": "craft", "value": "photographer"}],
+  "tailor": [{"category": "craft", "value": "tailor"}],
+  "dry_cleaning": [{"category": "shop", "value": "laundry"}]
+}
