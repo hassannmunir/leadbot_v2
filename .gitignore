@@ -5,5 +5,10 @@ __pycache__/
 config.json
 leads.csv
 quota_state.json
+website_cache.sqlite3
+website_cache.sqlite3-shm
+website_cache.sqlite3-wal
 *.json.key
 leadbot-service-account.json
+
+asads.json

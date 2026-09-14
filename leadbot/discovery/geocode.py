@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import requests
 
-from .policy import Guard, QuotaTracker, retry_request
+from ..safety.policy import Guard, QuotaTracker, retry_request
 
 Bbox = tuple  # (south, west, north, east) -- always in this order throughout the project
 
@@ -24,13 +24,15 @@ Bbox = tuple  # (south, west, north, east) -- always in this order throughout th
 def _geocode_nominatim(country: str, region: str, guard: Guard) -> Bbox | None:
     """Free, no API key, and reliably returns a real administrative bounding
     box for named places (cities, states, countries) -- tried first."""
-    guard.wait("nominatim.openstreetmap.org")
-    response = retry_request(lambda: requests.get(
-        "https://nominatim.openstreetmap.org/search",
-        params={"q": f"{region}, {country}", "format": "json", "limit": 1},
-        headers={"User-Agent": guard.user_agent},
-        timeout=20,
-    ))
+    response = retry_request(lambda: (
+        guard.wait("nominatim.openstreetmap.org"),
+        requests.get(
+            "https://nominatim.openstreetmap.org/search",
+            params={"q": f"{region}, {country}", "format": "json", "limit": 1},
+            headers={"User-Agent": guard.user_agent},
+            timeout=20,
+        ),
+    )[1])
     if response is None or response.status_code != 200:
         return None
     results = response.json()
@@ -50,13 +52,15 @@ def _geocode_geoapify(country: str, region: str, api_key: str, guard: Guard, quo
         print("Geoapify: daily free-tier budget reached for today, skipping.")
         return None
 
-    guard.wait("api.geoapify.com")
-    response = retry_request(lambda: requests.get(
-        "https://api.geoapify.com/v1/geocode/search",
-        params={"text": f"{region}, {country}", "limit": 1, "apiKey": api_key},
-        headers={"User-Agent": guard.user_agent},
-        timeout=20,
-    ))
+    response = retry_request(lambda: (
+        guard.wait("api.geoapify.com"),
+        requests.get(
+            "https://api.geoapify.com/v1/geocode/search",
+            params={"text": f"{region}, {country}", "limit": 1, "apiKey": api_key},
+            headers={"User-Agent": guard.user_agent},
+            timeout=20,
+        ),
+    )[1])
     quota.record_use("geoapify")
     if response is None or response.status_code != 200:
         return None

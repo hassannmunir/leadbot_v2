@@ -25,7 +25,9 @@ Bugs fixed vs the old policy.py:
 """
 
 import json
+import threading
 import time
+from collections import defaultdict, deque
 from datetime import date
 from pathlib import Path
 from urllib.parse import urlparse
@@ -34,20 +36,62 @@ from urllib.robotparser import RobotFileParser
 import requests
 
 
+class SlidingWindowRateLimiter:
+    """Enforce a request budget per key across all worker threads."""
+
+    def __init__(self, requests_per_minute: int = 1000, safety_ratio: float = 0.9):
+        self.safe_limit = max(1, int(requests_per_minute * max(0.1, min(1.0, safety_ratio))))
+        self.window_seconds = 60.0
+        self._requests = defaultdict(deque)
+        self._lock = threading.Lock()
+
+    def wait(self, key: str) -> None:
+        """Wait until one request can be reserved inside the safe window."""
+        while True:
+            now = time.monotonic()
+            with self._lock:
+                timestamps = self._requests[key]
+                while timestamps and now - timestamps[0] >= self.window_seconds:
+                    timestamps.popleft()
+                if len(timestamps) < self.safe_limit:
+                    timestamps.append(now)
+                    return
+                sleep_for = self.window_seconds - (now - timestamps[0])
+            time.sleep(max(0.01, sleep_for))
+
+
 class Guard:
     """Deliberately simple safety layer: no proxy rotation, no CAPTCHA bypass, no stealth."""
 
-    def __init__(self, delay=3.0, user_agent="LeadBot/2.0 (+contact-your-business)"):
+    def __init__(
+        self,
+        delay=3.0,
+        user_agent="LeadBot/2.0 (+contact-your-business)",
+        robots_ttl_seconds=86400,
+        requests_per_minute=1000,
+        rate_limit_safety_ratio=0.9,
+    ):
         self.delay = max(2.0, delay)
         self.user_agent = user_agent
+        self.rate_limiter = SlidingWindowRateLimiter(requests_per_minute, rate_limit_safety_ratio)
         self._last_request_at = {}
+        self._host_locks = {}
+        self._state_lock = threading.Lock()
+        self._robots_cache = {}
+        self._robots_ttl_seconds = max(0, robots_ttl_seconds)
+
+    def _lock_for_host(self, host: str):
+        with self._state_lock:
+            return self._host_locks.setdefault(host, threading.Lock())
 
     def wait(self, host: str):
         """Block just long enough to keep at least `delay` seconds between requests to `host`."""
-        gap = self.delay - (time.monotonic() - self._last_request_at.get(host, 0))
-        if gap > 0:
-            time.sleep(gap)
-        self._last_request_at[host] = time.monotonic()
+        self.rate_limiter.wait(host)
+        with self._lock_for_host(host):
+            gap = self.delay - (time.monotonic() - self._last_request_at.get(host, 0))
+            if gap > 0:
+                time.sleep(gap)
+            self._last_request_at[host] = time.monotonic()
 
     def allowed(self, url: str) -> bool:
         """
@@ -56,6 +100,12 @@ class Guard:
         """
         parsed = urlparse(url)
         host = parsed.netloc
+        now = time.monotonic()
+        with self._state_lock:
+            cached = self._robots_cache.get(host)
+        if cached and now - cached[0] < self._robots_ttl_seconds:
+            return cached[1]
+
         self.wait(host)
         robots_url = f"{parsed.scheme}://{host}/robots.txt"
         parser = RobotFileParser(robots_url)
@@ -64,10 +114,16 @@ class Guard:
                 robots_url, headers={"User-Agent": self.user_agent}, timeout=8
             )
             if response.status_code >= 400:
-                return True  # no readable robots.txt -> nothing to disallow
-            parser.parse(response.text.splitlines())
-            return parser.can_fetch(self.user_agent, url)
+                allowed = True  # no readable robots.txt -> nothing to disallow
+            else:
+                parser.parse(response.text.splitlines())
+                allowed = parser.can_fetch(self.user_agent, url)
+            with self._state_lock:
+                self._robots_cache[host] = (time.monotonic(), allowed)
+            return allowed
         except requests.RequestException:
+            with self._state_lock:
+                self._robots_cache[host] = (time.monotonic(), True)
             return True  # network hiccup -> don't punish the business for it
 
 

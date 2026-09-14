@@ -24,9 +24,9 @@ from pathlib import Path
 
 import requests
 
-from .models import Lead
-from .policy import Guard, retry_request
-from .utils import extract_emails, normalize_phone, normalize_url
+from ..core.models import Lead
+from ..safety.policy import Guard, retry_request
+from ..core.utils import extract_emails, normalize_phone, normalize_url
 
 DEFAULT_ENDPOINTS = [
     "https://overpass-api.de/api/interpreter",
@@ -46,8 +46,43 @@ def tags_for_niche(niche: str, niche_map: dict) -> list[dict]:
     return niche_map.get(niche.strip().lower(), [])
 
 
+def _extract_osm_socials(tags_dict: dict) -> str:
+    """
+    Pull every social-media link OSM contributors have added to a business.
+
+    OSM mappers use two conventions:
+      contact:facebook=https://facebook.com/...   (preferred, newer)
+      facebook=https://facebook.com/...            (older, still common)
+
+    We check both for every major platform and return them as a
+    pipe-separated string matching the format the rest of the pipeline
+    expects (same as extract_social_links() in utils.py).
+    """
+    platforms = [
+        ("facebook",  "contact:facebook"),
+        ("instagram", "contact:instagram"),
+        ("twitter",   "contact:twitter"),
+        ("linkedin",  "contact:linkedin"),
+        ("youtube",   "contact:youtube"),
+        ("tiktok",    "contact:tiktok"),
+        ("whatsapp",  "contact:whatsapp"),
+    ]
+    found = []
+    for plain_key, contact_key in platforms:
+        value = tags_dict.get(contact_key) or tags_dict.get(plain_key) or ""
+        value = value.strip()
+        if not value:
+            continue
+        # Keep explicit URLs unchanged. Preserve bare handles with a platform
+        # label, but never turn them into guessed URLs.
+        if not value.startswith(("http://", "https://")):
+            value = f"{plain_key}:@{value.lstrip('@/') }"
+        found.append(value)
+    return " | ".join(found)
+
+
 class OpenStreetMapSource:
-    def __init__(self, guard: Guard, endpoints=None, max_results_per_tile=200, max_attempts=3):
+    def __init__(self, guard: Guard, endpoints=None, max_results_per_tile=None, max_attempts=3):
         self.guard = guard
         self.endpoints = endpoints or DEFAULT_ENDPOINTS
         self.max_results_per_tile = max_results_per_tile
@@ -58,7 +93,7 @@ class OpenStreetMapSource:
         query = (
             f'[out:json][timeout:30];'
             f'nwr["{category}"="{value}"]({south},{west},{north},{east});'
-            f'out center tags;'  # <-- the fix: tags are ALWAYS requested
+            f'out center tags;'
         )
         for endpoint in self.endpoints:
             host = endpoint.split("/")[2]
@@ -79,17 +114,33 @@ class OpenStreetMapSource:
             time.sleep(2)  # brief pause before trying the next mirror
         return []  # every mirror failed for this tile -- caller just gets fewer results, never crashes
 
-    def collect(self, niche: str, tags: list[dict], bboxes: list, country: str, region: str, phone_region: str):
+    def collect(self, niche: str, tags: list[dict], bboxes: list, country: str, region: str, phone_region: str, progress_cb=None):
         """
         Query every (category, value) tag for `niche`, across every bbox
         tile, and yield de-duplicated Lead objects.
+
+        OSM tags mined per business (where contributors have added them):
+          name, address (housenumber + street + city), website, email,
+          phone, AND all social-media links (facebook, instagram, twitter,
+          linkedin, youtube, tiktok, whatsapp) via _extract_osm_socials().
+
+        progress_cb(fraction, message), if given, is called after EACH
+        tile so the UI progress bar keeps moving during long state-wide runs.
         """
         seen_osm_ids = set()
+        total_tiles = max(1, len(tags) * len(bboxes))
+        done = 0
         for tag in tags:
             for bbox in bboxes:
                 elements = self._query_one_tile(tag["category"], tag["value"], bbox)
+                done += 1
                 print(f"  OSM tile {bbox}: {len(elements)} raw results for {tag['category']}={tag['value']}")
-                for element in elements[: self.max_results_per_tile]:
+                selected_elements = (
+                    elements
+                    if self.max_results_per_tile is None
+                    else elements[: self.max_results_per_tile]
+                )
+                for element in selected_elements:
                     osm_id = (element.get("type"), element.get("id"))
                     if osm_id in seen_osm_ids:
                         continue
@@ -98,18 +149,26 @@ class OpenStreetMapSource:
                     tags_dict = element.get("tags", {})
                     name = tags_dict.get("name", "")
                     if not name:
-                        continue  # a real record with genuinely no name tag -- nothing to sell to
+                        continue
 
                     address = " ".join(filter(None, [
                         tags_dict.get("addr:housenumber"),
                         tags_dict.get("addr:street"),
                         tags_dict.get("addr:city"),
                     ])) or tags_dict.get("addr:city", "")
-                    emails = extract_emails(tags_dict.get("email", tags_dict.get("contact:email", "")))
-                    website = normalize_url(tags_dict.get("website", tags_dict.get("contact:website", "")))
-                    phone = normalize_phone(
-                        tags_dict.get("phone", tags_dict.get("contact:phone", "")), phone_region
+
+                    emails = extract_emails(
+                        tags_dict.get("email", tags_dict.get("contact:email", ""))
                     )
+                    website = normalize_url(
+                        tags_dict.get("website", tags_dict.get("contact:website", ""))
+                    )
+                    phone = normalize_phone(
+                        tags_dict.get("phone", tags_dict.get("contact:phone", "")),
+                        phone_region,
+                    )
+                    # KEY FIX: extract all social links OSM contributors added
+                    social_links = _extract_osm_socials(tags_dict)
 
                     yield Lead(
                         name=name,
@@ -122,4 +181,8 @@ class OpenStreetMapSource:
                         location=address,
                         country=country,
                         region=region,
+                        social_links=social_links,  # NOW POPULATED FROM OSM
                     )
+                if progress_cb:
+                    progress_cb(done / total_tiles, f"OSM tile {done}/{total_tiles} "
+                                                      f"({tag['value']}) -- {len(seen_osm_ids)} businesses so far")

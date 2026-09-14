@@ -68,9 +68,27 @@ Then open http://127.0.0.1:8080, pick country/region/niche from the dropdown, an
 
 This is a **free, no-card, respectful-of-rate-limits** tool — that means it is not instant. Overpass (OpenStreetMap's free query engine) needs a few seconds of pacing between requests. A single city query takes well under a minute. A whole US state gets automatically split into many small tiles so it never times out or gets your IP blocked, but that can take 15-30+ minutes for one niche. **For faster, more targeted results, list several major cities in `queries` instead of one state** — see `config.example.json`.
 
+## Performance controls
+
+The default configuration is suitable for a continuously running process:
+
+- `verification_workers` runs website verification concurrently across different hosts.
+- `delay_seconds` and per-host locks continue to protect each host from bursts.
+- `requests_per_minute` defines the provider/host ceiling and `rate_limit_safety_ratio` defaults to `0.9`, so a 1,000 RPM ceiling is limited to 900 RPM.
+- `robots_cache_ttl_seconds` avoids refetching unchanged robots files.
+- `storage_cache_ttl_seconds` avoids rescanning all stored leads on every batch while periodically refreshing shared-sheet state.
+- `website_cache_file` and `website_cache_ttl_seconds` persist website verification results for seven days by default.
+- `storage_batch_size` controls how many verified leads are written per storage operation; the default is 50.
+- Wikidata lookups use a bounded one-hour cache keyed by business name and location.
+
+Increase `verification_workers` carefully. More workers improve throughput across
+different domains, but they do not bypass per-host pacing or external service limits.
+Every retry attempt consumes a rate-limit slot, and the shared limiter applies
+across all workers, so a transient error cannot accidentally create a request burst.
+
 ## Adding a niche
 
-Open `leadbot/niche_map.json` and add an entry, e.g.:
+Open `leadbot/discovery/niche_map.json` and add an entry, e.g.:
 ```json
 "pet_grooming": [{"category": "shop", "value": "pet_grooming"}]
 ```
@@ -78,14 +96,19 @@ Find the right OSM `category`/`value` pair by searching the niche at https://wik
 
 ## Files
 
-- `models.py` — the `Lead` record and the one dedup key used everywhere
-- `policy.py` — rate limiting, robots.txt checking, retry/backoff, daily quota tracker
-- `geocode.py` — region name → bounding box (Geoapify or free Nominatim), plus tiling large regions
-- `sources.py` — OpenStreetMap/Overpass business search
-- `verify.py` — visits each lead's own website for real contact info/socials
-- `storage.py` — Google Sheets or CSV, append-only-new-leads
-- `main.py` — wires the above together
-- `ui.py` — local web form
+- `app/` — CLI, configuration, progress, and pipeline orchestration
+- `core/` — lead models and normalization, extraction, and scoring rules
+- `discovery/` — geocoding, OpenStreetMap/Overpass search, and niche mappings
+- `enrichment/` — business website and Wikidata contact enrichment
+- `storage/` — Google Sheets and CSV storage adapters
+- `safety/` — request pacing, retries, robots.txt, and quota tracking
+- `ui/` — local HTTP server, UI state, and HTML templates
+- `main.py` — backward-compatible CLI entry point
+- `ui.py` — backward-compatible web UI entry point
+
+The command-line and web entry points are intentionally thin. Feature code
+lives in focused modules so discovery, enrichment, persistence, progress
+reporting, and interface behavior can be tested or replaced independently.
 
 ## Boundaries (unchanged from v1's intent)
 
