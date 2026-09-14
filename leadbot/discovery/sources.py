@@ -24,9 +24,9 @@ from pathlib import Path
 
 import requests
 
-from .models import Lead
-from .policy import Guard, retry_request
-from .utils import extract_emails, normalize_phone, normalize_url
+from ..core.models import Lead
+from ..safety.policy import Guard, retry_request
+from ..core.utils import extract_emails, normalize_phone, normalize_url
 
 DEFAULT_ENDPOINTS = [
     "https://overpass-api.de/api/interpreter",
@@ -73,18 +73,10 @@ def _extract_osm_socials(tags_dict: dict) -> str:
         value = value.strip()
         if not value:
             continue
-        # Normalize: some mappers write just the handle, not the full URL
-        if not value.startswith("http"):
-            base_urls = {
-                "facebook":  "https://facebook.com/",
-                "instagram": "https://instagram.com/",
-                "twitter":   "https://twitter.com/",
-                "linkedin":  "https://linkedin.com/company/",
-                "youtube":   "https://youtube.com/",
-                "tiktok":    "https://tiktok.com/@",
-                "whatsapp":  "https://wa.me/",
-            }
-            value = base_urls.get(plain_key, "") + value.lstrip("@/")
+        # Keep explicit URLs unchanged. Preserve bare handles with a platform
+        # label, but never turn them into guessed URLs.
+        if not value.startswith(("http://", "https://")):
+            value = f"{plain_key}:@{value.lstrip('@/') }"
         found.append(value)
     return " | ".join(found)
 

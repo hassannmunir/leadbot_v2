@@ -22,10 +22,11 @@ from __future__ import annotations
 
 import requests
 from bs4 import BeautifulSoup
+from urllib.parse import urlparse
 
-from .models import Lead
-from .policy import Guard, retry_request
-from .utils import extract_emails, extract_social_links, PHONE_RE, normalize_phone, normalize_url
+from ..core.models import Lead
+from ..safety.policy import Guard, retry_request
+from ..core.utils import extract_emails, extract_social_links, PHONE_RE, normalize_phone, normalize_url
 from .wikidata import enrich_from_wikidata
 
 
@@ -63,8 +64,13 @@ def verify_website(lead: Lead, guard: Guard, phone_region: str = "PK") -> Lead:
         enrich_from_wikidata(lead, guard)
         return lead
 
+    # Keep a full pacing interval between robots.txt and page requests, and
+    # reserve a rate-limit slot for every retry attempt.
     response = retry_request(
-        lambda: requests.get(url, headers={"User-Agent": guard.user_agent}, timeout=15),
+        lambda: (
+            guard.wait(urlparse(url).netloc),
+            requests.get(url, headers={"User-Agent": guard.user_agent}, timeout=15),
+        )[1],
         max_attempts=3,
     )
 

@@ -28,17 +28,25 @@ APIs USED (both official, free, no key needed):
 from __future__ import annotations
 
 import re
+import threading
+import time
+from collections import OrderedDict
+from urllib.parse import urlparse
 import requests
 
-from .models import Lead, normalize_domain
-from .policy import Guard, retry_request
-from .utils import normalize_url
+from ..core.models import Lead, normalize_domain
+from ..safety.policy import Guard, retry_request
+from ..core.utils import normalize_url
 
 _SEARCH_URL = "https://www.wikidata.org/w/api.php"
 _SPARQL_URL = "https://query.wikidata.org/sparql"
 _USER_AGENT = "LeadBot/2.0 (business lead enrichment; open-source)"
 _MIN_NAME_SIMILARITY = 0.6
 _MIN_NAME_MARGIN = 0.15
+_CACHE_TTL_SECONDS = 3600
+_CACHE_MAX_ENTRIES = 5000
+_CACHE_LOCK = threading.Lock()
+_LOOKUP_CACHE: OrderedDict[str, tuple[float, str | None, dict]] = OrderedDict()
 
 # Wikidata property IDs -- all verified against wikidata.org/wiki/Property:P*
 _PROPS = {
@@ -136,34 +144,16 @@ def _clean_email(raw: str) -> str:
     return ""
 
 
-def _clean_handle(raw: str) -> str:
-    """Strip whitespace, @, leading slashes from a social handle."""
-    return (raw or "").strip().lstrip("@/").strip()
-
-
 def _build_social_url(platform: str, handle_or_url: str) -> str:
     """
-    Given a raw Wikidata value (may be a handle like 'myshop' or a full
-    URL like 'https://facebook.com/myshop'), return a clean full URL.
-    Returns empty string if handle is empty or obviously invalid.
+    Preserve complete URLs and label bare handles without inventing URLs.
     """
-    base = {
-        "facebook":  "https://www.facebook.com/",
-        "instagram": "https://www.instagram.com/",
-        "twitter":   "https://twitter.com/",
-        "linkedin":  "https://www.linkedin.com/company/",
-        "youtube":   "https://www.youtube.com/channel/",
-        "tiktok":    "https://www.tiktok.com/@",
-    }
-    raw = _clean_handle(handle_or_url)
-    if not raw:
-        return ""
-    if raw.startswith("http"):
-        return raw  # already a full URL
-    prefix = base.get(platform, "")
-    if not prefix:
-        return ""
-    return prefix + raw
+    raw = (handle_or_url or "").strip()
+    parsed = urlparse(raw)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        handle = raw.lstrip("@/").strip()
+        return f"{platform}:@{handle}" if handle else ""
+    return raw
 
 
 # -----------------------------------------------------------------------
@@ -180,25 +170,26 @@ def _search_qid(name: str, region: str, guard: Guard) -> str | None:
     Tries "name + region" first (more specific), falls back to "name" alone.
     Returns None if no confident match found -- NEVER returns a wrong QID.
     """
-    guard.wait("www.wikidata.org")
-
     search_terms = [f"{name} {region}".strip(), name] if region else [name]
 
     for term in search_terms:
         resp = retry_request(
-            lambda t=term: requests.get(
-                _SEARCH_URL,
-                params={
-                    "action":   "wbsearchentities",
-                    "search":   t,
-                    "language": "en",
-                    "type":     "item",
-                    "limit":    "5",       # get 5 so we can pick best match
-                    "format":   "json",
-                },
-                headers={"User-Agent": _USER_AGENT},
-                timeout=10,
-            ),
+            lambda t=term: (
+                guard.wait("www.wikidata.org"),
+                requests.get(
+                    _SEARCH_URL,
+                    params={
+                        "action":   "wbsearchentities",
+                        "search":   t,
+                        "language": "en",
+                        "type":     "item",
+                        "limit":    "5",       # get 5 so we can pick best match
+                        "format":   "json",
+                    },
+                    headers={"User-Agent": _USER_AGENT},
+                    timeout=10,
+                ),
+            )[1],
             max_attempts=2,
         )
 
@@ -234,14 +225,16 @@ SELECT ?instanceOf WHERE {{
 }}
 LIMIT 10
 """
-    guard.wait("query.wikidata.org")
     resp = retry_request(
-        lambda: requests.get(
-            _SPARQL_URL,
-            params={"query": sparql, "format": "json"},
-            headers={"User-Agent": _USER_AGENT, "Accept": "application/sparql-results+json"},
-            timeout=12,
-        ),
+        lambda: (
+            guard.wait("query.wikidata.org"),
+            requests.get(
+                _SPARQL_URL,
+                params={"query": sparql, "format": "json"},
+                headers={"User-Agent": _USER_AGENT, "Accept": "application/sparql-results+json"},
+                timeout=12,
+            ),
+        )[1],
         max_attempts=2,
     )
 
@@ -288,14 +281,16 @@ WHERE {{
 }}
 LIMIT 1
 """
-    guard.wait("query.wikidata.org")
     resp = retry_request(
-        lambda: requests.get(
-            _SPARQL_URL,
-            params={"query": sparql, "format": "json"},
-            headers={"User-Agent": _USER_AGENT, "Accept": "application/sparql-results+json"},
-            timeout=15,
-        ),
+        lambda: (
+            guard.wait("query.wikidata.org"),
+            requests.get(
+                _SPARQL_URL,
+                params={"query": sparql, "format": "json"},
+                headers={"User-Agent": _USER_AGENT, "Accept": "application/sparql-results+json"},
+                timeout=15,
+            ),
+        )[1],
         max_attempts=2,
     )
 
@@ -348,6 +343,29 @@ LIMIT 1
 # Public entry point
 # -----------------------------------------------------------------------
 
+def _cached_lookup(name: str, region: str, location: str, guard: Guard) -> tuple[str | None, dict]:
+    """Resolve one business through Wikidata at most once per cache period."""
+    cache_key = "|".join((name.strip().lower(), region.strip().lower(), location.strip().lower()))
+    now = time.monotonic()
+    with _CACHE_LOCK:
+        cached = _LOOKUP_CACHE.get(cache_key)
+        if cached and now - cached[0] < _CACHE_TTL_SECONDS:
+            _LOOKUP_CACHE.move_to_end(cache_key)
+            return cached[1], dict(cached[2])
+
+    search_context = " ".join(part for part in (region, location) if part).strip()
+    qid = _search_qid(name, search_context, guard)
+    props = {}
+    if qid and _is_organisation(qid, guard):
+        props = _fetch_properties(qid, guard)
+
+    with _CACHE_LOCK:
+        _LOOKUP_CACHE[cache_key] = (time.monotonic(), qid, dict(props))
+        _LOOKUP_CACHE.move_to_end(cache_key)
+        while len(_LOOKUP_CACHE) > _CACHE_MAX_ENTRIES:
+            _LOOKUP_CACHE.popitem(last=False)
+    return qid, props
+
 def enrich_from_wikidata(lead: Lead, guard: Guard) -> None:
     """
     Enrich `lead` with verified data from Wikidata.
@@ -362,20 +380,16 @@ def enrich_from_wikidata(lead: Lead, guard: Guard) -> None:
         return
 
     # Step 1: find QID with name similarity validation
-    qid = _search_qid(
+    lookup_region = lead.region or lead.country or ""
+    lookup_location = lead.location or ""
+    qid, props = _cached_lookup(
         lead.name,
-        lead.region or lead.location or lead.country or "",
+        lookup_region,
+        lookup_location,
         guard,
     )
     if not qid:
         return  # no match found -- silent, correct behaviour
-
-    # Step 2: confirm it's actually a business/org entity
-    if not _is_organisation(qid, guard):
-        return  # matched wrong type of entity (person, city, etc.) -- skip
-
-    # Step 3: fetch and validate properties
-    props = _fetch_properties(qid, guard)
     if not props:
         return  # entity exists but has no contact properties -- silent
 

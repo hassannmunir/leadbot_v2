@@ -31,10 +31,11 @@ CSV fallback (no Google Sheets):
 from __future__ import annotations
 
 import csv
+import time
 from pathlib import Path
 from typing import List
 
-from .models import Lead, LEAD_FIELDS
+from ..core.models import Lead, LEAD_FIELDS
 
 MAX_ROWS_DEFAULT = 1000
 
@@ -55,11 +56,14 @@ def _category(lead: Lead) -> str:
 class CSVStorage:
     """Two CSV files, one per category. Accumulates across runs."""
 
-    def __init__(self, base_path: str = "leads"):
+    def __init__(self, base_path: str = "leads", cache_ttl_seconds: int = 300):
         self._paths = {
             "With Website": Path(f"{base_path}_with_website.csv"),
             "No Website":   Path(f"{base_path}_no_website.csv"),
         }
+        self._existing_keys: set | None = None
+        self._keys_loaded_at = 0.0
+        self._cache_ttl_seconds = max(0, cache_ttl_seconds)
 
     def _load_keys(self, path: Path) -> set:
         if not path.exists():
@@ -71,10 +75,17 @@ class CSVStorage:
             }
 
     def load_existing_keys(self) -> set:
+        if (
+            self._existing_keys is not None
+            and time.monotonic() - self._keys_loaded_at < self._cache_ttl_seconds
+        ):
+            return self._existing_keys
         keys: set = set()
         for path in self._paths.values():
             keys |= self._load_keys(path)
-        return keys
+        self._existing_keys = keys
+        self._keys_loaded_at = time.monotonic()
+        return self._existing_keys
 
     def append_new_leads(self, leads: List[Lead]) -> int:
         existing = self.load_existing_keys()
@@ -125,14 +136,19 @@ class GoogleSheetStorage:
         "No Website":   "No Website",
     }
 
-    def __init__(self, sheet_id: str, service_account_file: str, max_rows: int = MAX_ROWS_DEFAULT):
+    def __init__(self, sheet_id: str, service_account_file: str, max_rows: int = MAX_ROWS_DEFAULT,
+                 cache_ttl_seconds: int = 300):
         import gspread
         self._max_rows = max(10, max_rows)
+        self._existing_keys: set | None = None
+        self._keys_loaded_at = 0.0
+        self._cache_ttl_seconds = max(0, cache_ttl_seconds)
         creds = gspread.service_account(filename=service_account_file)
         self._book = creds.open_by_key(sheet_id)
         # Ensure at least the base tabs exist on first run
         for base in self._BASE_NAMES.values():
             self._get_or_create_worksheet(base)
+        self._normalize_all_headers()
 
     # ------------------------------------------------------------------
     # Worksheet management
@@ -155,6 +171,45 @@ class GoogleSheetStorage:
             ws.append_row(LEAD_FIELDS, value_input_option="RAW")
             return ws
 
+    @staticmethod
+    def _normalize_headers(ws) -> None:
+        """Remove duplicate header columns and restore the canonical schema."""
+        try:
+            header = ws.row_values(1)
+        except Exception:
+            return
+
+        seen = set()
+        duplicate_indexes = []
+        for index, field in enumerate(header, start=1):
+            if field in seen:
+                duplicate_indexes.append(index)
+            else:
+                seen.add(field)
+
+        for index in reversed(duplicate_indexes):
+            try:
+                ws.delete_columns(index)
+            except Exception:
+                return
+
+        try:
+            ws.update("A1", [LEAD_FIELDS], value_input_option="RAW")
+        except Exception:
+            try:
+                ws.update("A1:" + chr(64 + len(LEAD_FIELDS)) + "1", [LEAD_FIELDS], value_input_option="RAW")
+            except Exception:
+                return
+
+    def _normalize_all_headers(self) -> None:
+        """Migrate existing category and overflow tabs to one schema."""
+        for worksheet in self._book.worksheets():
+            if any(
+                worksheet.title == base or worksheet.title.startswith(f"{base} ")
+                for base in self._BASE_NAMES.values()
+            ):
+                self._normalize_headers(worksheet)
+
     def _tabs_for_category(self, base: str) -> list:
         """
         Return all existing worksheets for a category, in order:
@@ -165,7 +220,9 @@ class GoogleSheetStorage:
         tabs = []
         # Base tab (no number suffix)
         if base in existing:
-            tabs.append(self._book.worksheet(base))
+            worksheet = self._book.worksheet(base)
+            self._normalize_headers(worksheet)
+            tabs.append(worksheet)
         else:
             tabs.append(self._get_or_create_worksheet(base))
         # Numbered overflow tabs that already exist
@@ -173,7 +230,9 @@ class GoogleSheetStorage:
         while True:
             name = f"{base} {n}"
             if name in existing:
-                tabs.append(self._book.worksheet(name))
+                worksheet = self._book.worksheet(name)
+                self._normalize_headers(worksheet)
+                tabs.append(worksheet)
                 n += 1
             else:
                 break
@@ -217,6 +276,12 @@ class GoogleSheetStorage:
         and return the set of dedup keys already stored.
         This guarantees a lead never appears twice, even across tabs.
         """
+        if (
+            self._existing_keys is not None
+            and time.monotonic() - self._keys_loaded_at < self._cache_ttl_seconds
+        ):
+            return self._existing_keys
+
         keys: set = set()
         for base in self._BASE_NAMES.values():
             for ws in self._tabs_for_category(base):
@@ -230,7 +295,9 @@ class GoogleSheetStorage:
                         keys.add(lead.dedup_key)
                     except Exception:
                         continue
-        return keys
+        self._existing_keys = keys
+        self._keys_loaded_at = time.monotonic()
+        return self._existing_keys
 
     # ------------------------------------------------------------------
     # Writing
@@ -290,9 +357,10 @@ def get_storage(config: dict):
     sheet_id    = config.get("google_sheet_id", "")
     sa_file     = config.get("google_service_account_file", "")
     max_rows    = int(config.get("sheet_max_rows", MAX_ROWS_DEFAULT))
+    cache_ttl   = int(config.get("storage_cache_ttl_seconds", 300))
 
     if sheet_id and sa_file:
-        return GoogleSheetStorage(sheet_id, sa_file, max_rows=max_rows)
+        return GoogleSheetStorage(sheet_id, sa_file, max_rows=max_rows, cache_ttl_seconds=cache_ttl)
 
     print("Google Sheets not configured -- writing to local CSV files instead.")
-    return CSVStorage(config.get("csv_out", "leads"))
+    return CSVStorage(config.get("csv_out", "leads"), cache_ttl_seconds=cache_ttl)
