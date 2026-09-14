@@ -29,7 +29,7 @@ class StorageSchemaTests(unittest.TestCase):
         GoogleSheetStorage._normalize_headers(worksheet)
 
         self.assertEqual(worksheet.headers, LEAD_FIELDS)
-        self.assertEqual(worksheet.deleted, [18, 17])
+        self.assertEqual(worksheet.deleted, [len(LEAD_FIELDS) + 2, len(LEAD_FIELDS) + 1])
         self.assertEqual(worksheet.updated[1], [LEAD_FIELDS])
 
 

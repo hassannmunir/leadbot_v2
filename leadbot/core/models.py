@@ -53,6 +53,7 @@ class Lead:
     ai_agent_fit_score: int = 0
     ai_agent_priority: str = ""
     ai_agent_opportunities: str = ""
+    recommended_offer: str = ""
     email: str = ""
     phone: str = ""
     location: str = ""

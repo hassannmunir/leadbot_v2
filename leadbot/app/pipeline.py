@@ -9,7 +9,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from ..discovery.geocode import geocode_region, split_bbox
 from ..core.models import Lead
 from ..discovery.sources import OpenStreetMapSource, tags_for_niche
-from ..core.utils import assess_ai_agent_fit, quality_score
+from ..core.scoring import LeadScorer
+from ..core.utils import quality_score
 from ..enrichment.verify import verify_website
 from ..enrichment.website_cache import WebsiteCache
 
@@ -31,6 +32,7 @@ class LeadPipeline:
             self.config.get("website_cache_file", "website_cache.sqlite3"),
             self.config.get("website_cache_ttl_seconds", 604800),
         )
+        self.scorer = LeadScorer()
 
     def close(self) -> None:
         """Release persistent resources after a run."""
@@ -96,7 +98,10 @@ class LeadPipeline:
 
         def verify_and_score(lead: Lead) -> Lead:
             verify_website(lead, self.guard, phone_region, self.website_cache)
-            assess_ai_agent_fit(lead)
+            scored = self.scorer.score_lead(lead.as_dict())
+            lead.ai_agent_fit_score = scored["ai_agent_fit_score"]
+            lead.ai_agent_priority = scored["ai_agent_priority"]
+            lead.recommended_offer = scored["recommended_offer"]
             return lead
 
         try:
