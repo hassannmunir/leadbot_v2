@@ -80,7 +80,11 @@ def collect_for_query(query: dict, config: dict, guard: Guard, quota: QuotaTrack
     tiles = split_bbox(bbox, max_area_deg2=config.get("max_tile_area_deg2", 0.5))
     progress_cb(0.08, f"'{niche}' in '{region}, {country}' -> {len(tiles)} search tile(s)")
 
-    source = OpenStreetMapSource(guard, endpoints=config.get("overpass_endpoints"))
+    source = OpenStreetMapSource(
+        guard,
+        endpoints=config.get("overpass_endpoints"),
+        max_results_per_tile=config.get("max_results_per_tile"),
+    )
     osm_progress_cb = lambda tile_fraction, message: progress_cb(0.08 + 0.22 * tile_fraction, message)
     leads = list(source.collect(niche, tags, tiles, country, region, phone_region, osm_progress_cb))
     progress_cb(0.30, f"{len(leads)} unique businesses found, checking their websites...")
