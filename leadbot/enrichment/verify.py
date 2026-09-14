@@ -28,9 +28,15 @@ from ..core.models import Lead
 from ..safety.policy import Guard, retry_request
 from ..core.utils import extract_emails, extract_social_links, PHONE_RE, normalize_phone, normalize_url
 from .wikidata import enrich_from_wikidata
+from .website_cache import WebsiteCache
 
 
-def verify_website(lead: Lead, guard: Guard, phone_region: str = "PK") -> Lead:
+def verify_website(
+    lead: Lead,
+    guard: Guard,
+    phone_region: str = "PK",
+    website_cache: WebsiteCache | None = None,
+) -> Lead:
 
     # ------------------------------------------------------------------
     # CASE 1: No website in OSM -- go straight to Wikidata for everything
@@ -58,9 +64,16 @@ def verify_website(lead: Lead, guard: Guard, phone_region: str = "PK") -> Lead:
     # ------------------------------------------------------------------
     url = normalize_url(lead.website)
 
+    if website_cache and website_cache.load(lead):
+        enrich_from_wikidata(lead, guard)
+        website_cache.save(lead)
+        return lead
+
     if not guard.allowed(url):
         lead.website_status = "robots_denied"
         lead.notes = "Website robots.txt disallows access. Trying Wikidata for contact info."
+        if website_cache:
+            website_cache.save(lead)
         enrich_from_wikidata(lead, guard)
         return lead
 
@@ -77,6 +90,8 @@ def verify_website(lead: Lead, guard: Guard, phone_region: str = "PK") -> Lead:
     if response is None:
         lead.website_status = "unreachable"
         lead.notes = "Website did not respond after retries. Trying Wikidata for contact info."
+        if website_cache:
+            website_cache.save(lead)
         enrich_from_wikidata(lead, guard)
         return lead
 
@@ -86,12 +101,16 @@ def verify_website(lead: Lead, guard: Guard, phone_region: str = "PK") -> Lead:
             f"Website unavailable: HTTP {response.status_code} "
             f"(kept as rebuild prospect). Trying Wikidata for contact info."
         )
+        if website_cache:
+            website_cache.save(lead)
         enrich_from_wikidata(lead, guard)
         return lead
 
     if response.status_code != 200:
         lead.website_status = str(response.status_code)
         lead.notes = f"Website returned HTTP {response.status_code}."
+        if website_cache:
+            website_cache.save(lead)
         enrich_from_wikidata(lead, guard)
         return lead
 
@@ -123,4 +142,6 @@ def verify_website(lead: Lead, guard: Guard, phone_region: str = "PK") -> Lead:
         if has_contact
         else "Website reachable but no public contact details found on page or Wikidata."
     )
+    if website_cache:
+        website_cache.save(lead)
     return lead

@@ -157,16 +157,30 @@ def assess_ai_agent_fit(lead):
         return lead
 
     base_score, opportunities = profile
-    # Missing website/contact information does not erase a real use case, but
-    # it lowers outreach priority because the business is harder to activate.
-    evidence_adjustment = 0
-    if lead.website:
-        evidence_adjustment += 4
-    if lead.phone or lead.email:
-        evidence_adjustment += 3
-    score = min(95, base_score + evidence_adjustment)
+    website_status = (lead.website_status or "").strip().lower()
+    inactive_statuses = {"403", "404", "410", "429", "unreachable", "robots_denied"}
+    has_website = bool((lead.website or "").strip()) and website_status not in inactive_statuses
+    has_phone = bool((lead.phone or "").strip())
+    has_email = bool((lead.email or "").strip())
+    has_social = bool((lead.social_links or "").strip())
+    has_full_contact = has_phone and (has_email or has_social)
+
+    if has_website and has_full_contact:
+        # A reachable, contactable business is ready for an AI-agent offer.
+        score = min(95, max(85, base_score + 5))
+        priority = "high"
+    elif has_website:
+        # A website is a strong signal even when contact data is incomplete,
+        # but keep it below the fully contactable tier.
+        score = min(84, max(70, base_score))
+        priority = "high"
+    else:
+        # No website means activation and outreach are materially harder.
+        contact_evidence = sum((has_phone, has_email, has_social))
+        score = min(30, 10 + contact_evidence * 6)
+        priority = "low"
 
     lead.ai_agent_fit_score = score
-    lead.ai_agent_priority = "high" if score >= 70 else "medium" if score >= 40 else "low"
+    lead.ai_agent_priority = priority
     lead.ai_agent_opportunities = opportunities
     return lead

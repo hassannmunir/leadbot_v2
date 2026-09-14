@@ -38,11 +38,13 @@ def run(config_path: str) -> None:
 
             total_added += pipeline.collect_for_query(query, progress_callback)
     except KeyboardInterrupt:
+        pipeline.close()
         elapsed = format_duration(time.perf_counter() - started_at)
         report(100, f"Stopped by user. {total_added} new lead(s) were already saved before stopping.")
         print(f"Run summary: runtime {elapsed}; new leads saved {total_added}.", flush=True)
         return
 
+    pipeline.close()
     elapsed = format_duration(time.perf_counter() - started_at)
     report(100, f"Done. {total_added} new lead(s) added across all queries this run.")
     print(f"Run summary: runtime {elapsed}; new leads saved {total_added}.", flush=True)

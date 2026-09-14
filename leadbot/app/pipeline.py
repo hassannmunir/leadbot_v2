@@ -11,6 +11,7 @@ from ..core.models import Lead
 from ..discovery.sources import OpenStreetMapSource, tags_for_niche
 from ..core.utils import assess_ai_agent_fit, quality_score
 from ..enrichment.verify import verify_website
+from ..enrichment.website_cache import WebsiteCache
 
 BATCH_SIZE = 20
 
@@ -18,13 +19,22 @@ BATCH_SIZE = 20
 class LeadPipeline:
     """Coordinate discovery, enrichment, scoring, and append-only storage."""
 
-    def __init__(self, config: dict, guard, quota, niche_map: dict, storage, batch_size: int = BATCH_SIZE):
+    def __init__(self, config: dict, guard, quota, niche_map: dict, storage, batch_size: int | None = None):
         self.config = config
         self.guard = guard
         self.quota = quota
         self.niche_map = niche_map
         self.storage = storage
-        self.batch_size = max(1, batch_size)
+        configured_batch_size = config.get("storage_batch_size", BATCH_SIZE)
+        self.batch_size = max(1, int(batch_size if batch_size is not None else configured_batch_size))
+        self.website_cache = WebsiteCache(
+            self.config.get("website_cache_file", "website_cache.sqlite3"),
+            self.config.get("website_cache_ttl_seconds", 604800),
+        )
+
+    def close(self) -> None:
+        """Release persistent resources after a run."""
+        self.website_cache.close()
 
     def collect_for_query(self, query: dict, progress_cb: Callable[[float, str], None]) -> int:
         country = query.get("country", self.config.get("country", ""))
@@ -85,7 +95,7 @@ class LeadPipeline:
             buffer.clear()
 
         def verify_and_score(lead: Lead) -> Lead:
-            verify_website(lead, self.guard, phone_region)
+            verify_website(lead, self.guard, phone_region, self.website_cache)
             assess_ai_agent_fit(lead)
             return lead
 

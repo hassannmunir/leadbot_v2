@@ -379,6 +379,13 @@ def enrich_from_wikidata(lead: Lead, guard: Guard) -> None:
     if lead.website and lead.email and lead.phone and lead.social_links:
         return
 
+    # Wikidata is expensive. If OSM or the website already supplied two
+    # reliable contact channels, the remaining field is not worth another
+    # search/validation/property request during the main collection pass.
+    contact_fields = sum(bool(value) for value in (lead.email, lead.phone, lead.social_links))
+    if contact_fields >= 2:
+        return
+
     # Step 1: find QID with name similarity validation
     lookup_region = lead.region or lead.country or ""
     lookup_location = lead.location or ""

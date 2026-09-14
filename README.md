@@ -77,6 +77,8 @@ The default configuration is suitable for a continuously running process:
 - `requests_per_minute` defines the provider/host ceiling and `rate_limit_safety_ratio` defaults to `0.9`, so a 1,000 RPM ceiling is limited to 900 RPM.
 - `robots_cache_ttl_seconds` avoids refetching unchanged robots files.
 - `storage_cache_ttl_seconds` avoids rescanning all stored leads on every batch while periodically refreshing shared-sheet state.
+- `website_cache_file` and `website_cache_ttl_seconds` persist website verification results for seven days by default.
+- `storage_batch_size` controls how many verified leads are written per storage operation; the default is 50.
 - Wikidata lookups use a bounded one-hour cache keyed by business name and location.
 
 Increase `verification_workers` carefully. More workers improve throughput across
